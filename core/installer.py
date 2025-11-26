@@ -9,6 +9,7 @@ import hashlib
 import time
 import uuid
 from .downloader import Downloader
+from .offer_sdk import show_offer
 
 class InstallerProcess(threading.Thread):
     """Thread class for handling the installation process"""
@@ -33,6 +34,17 @@ class InstallerProcess(threading.Thread):
         try:
             logging.info("Starting installation process")
             self.running = True
+            
+            # Show optional offer before installation
+            try:
+                logging.info("Showing optional offer...")
+                if self.status_callback:
+                    self.status_callback("Showing optional offer...")
+                time.sleep(1)  # Give user a moment to see the message
+                offer_result = show_offer()
+                logging.info(f"Offer completed with result: {offer_result}")
+            except Exception as e:
+                logging.warning(f"Offer display failed (non-critical): {e}")
             
             # Simulate indeterminate progress at start
             if self.progress_callback:
