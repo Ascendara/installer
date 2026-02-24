@@ -31,5 +31,11 @@ Categories=Game;
 Terminal=false
 EOL
 
+chmod +x "$DESKTOP_FILE"
+
+if command -v update-desktop-database &> /dev/null; then
+    update-desktop-database ~/.local/share/applications
+fi
+
 echo "Ascendara installed successfully!"
 echo "You can now find it in your application menu."
