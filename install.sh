@@ -20,18 +20,25 @@ https://github.com/Ascendara/ascendara/releases/download/$VERSION/Ascendara-$VER
 chmod +x "$APPIMAGE_PATH"
 
 mkdir -p ~/.local/share/applications
+mkdir -p ~/.local/share/icons/hicolor/256x256/apps
+
+ICON_PATH="$HOME/.local/share/icons/hicolor/256x256/apps/ascendara.png"
+wget -O "$ICON_PATH" https://ascendara.app/icon.png
 
 cat > "$DESKTOP_FILE" <<EOL
 [Desktop Entry]
-Name=Ascendara
-Exec=$APPIMAGE_PATH
-Icon=ascendara
+Version=1.0
 Type=Application
+Name=Ascendara
+Comment=Game launcher and library manager
+Exec=$APPIMAGE_PATH --no-sandbox %U
+Icon=$ICON_PATH
 Categories=Game;
 Terminal=false
+StartupNotify=true
+MimeType=x-scheme-handler/ascendara;
+X-AppImage-Version=$VERSION
 EOL
-
-chmod +x "$DESKTOP_FILE"
 
 if command -v update-desktop-database &> /dev/null; then
     update-desktop-database ~/.local/share/applications
