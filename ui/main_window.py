@@ -237,12 +237,16 @@ class AscendaraInstaller(ctk.CTk):
         # Welcome section
         self._create_welcome_section()
         
-        # Progress section
-        self._create_progress_section()
+        # Buttons frame
+        self.buttons_frame = ctk.CTkFrame(
+            self.content_area,
+            fg_color="transparent"
+        )
+        self.buttons_frame.pack(pady=(20, 20))
         
         # Install button
         self.install_button = ctk.CTkButton(
-            self.content_area,
+            self.buttons_frame,
             text="Install",
             font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
             width=150,
@@ -253,11 +257,11 @@ class AscendaraInstaller(ctk.CTk):
             text_color="#FFFFFF",
             command=self._on_install_click
         )
-        self.install_button.pack(pady=(20, 0))
+        self.install_button.pack(side="left", padx=10)
         
         # Exit button
         self.exit_button = ctk.CTkButton(
-            self.content_area,
+            self.buttons_frame,
             text="Exit",
             font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
             width=150,
@@ -268,7 +272,11 @@ class AscendaraInstaller(ctk.CTk):
             text_color=self.colors["text_primary"],
             command=self.close
         )
-        self.exit_button.pack(pady=(10, 0))
+        self.exit_button.pack(side="left", padx=10)
+        
+        # Progress section (hidden initially)
+        self._create_progress_section()
+        self.progress_frame.pack_forget()  # Hide initially
     
     def _create_logo_section(self):
         """Create the logo section in the center top"""
@@ -394,7 +402,7 @@ class AscendaraInstaller(ctk.CTk):
         # Status label
         self.status_label = ctk.CTkLabel(
             self.progress_header,
-            text="Preparing...",
+            text="Ready to install",
             font=ctk.CTkFont(family="Segoe UI", size=14),
             text_color=self.colors["text_secondary"]
         )
@@ -569,8 +577,7 @@ class AscendaraInstaller(ctk.CTk):
     
     def on_fade_in_complete(self):
         """Called when fade in is complete"""
-        logging.info("Fade in complete, starting installation")
-        self._start_installation()
+        logging.info("Fade in complete, ready for user input")
     
     def _start_installation(self):
         """Start the installation process"""
@@ -711,9 +718,9 @@ class AscendaraInstaller(ctk.CTk):
         """Handle install button click"""
         logging.info("Install button clicked")
         
-        # Disable buttons during installation
-        self.install_button.configure(state="disabled")
-        self.exit_button.configure(state="disabled")
+        # Hide buttons and show progress section
+        self.buttons_frame.pack_forget()
+        self.progress_frame.pack(fill="x", padx=60, pady=20)
         
         # Update UI for installation
         self.current_task.configure(text="Preparing installation...")
@@ -751,5 +758,7 @@ class AscendaraInstaller(ctk.CTk):
         self.status_text.configure(text="Installation failed - See logs for details")
         self.current_task.configure(text="An error occurred during installation")
         self.progress_bar.configure(progress_color=self.colors["error"])
-        self.install_button.configure(state="normal")
-        self.exit_button.configure(state="normal")
+        
+        # Hide progress and show buttons so user can retry
+        self.progress_frame.pack_forget()
+        self.buttons_frame.pack(pady=(20, 20))
