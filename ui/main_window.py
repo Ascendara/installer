@@ -475,38 +475,49 @@ class AscendaraInstaller(ctk.CTk):
         self.copyright.pack(side="right", padx=10, pady=2)
     
     def _start_animation_loop(self):
-        """Start a high-performance animation loop running at 60 FPS"""
+        """Start the animation loop (only runs when needed)"""
         self.animation_running = True
+        self._animation_event = threading.Event()
         animation_thread = threading.Thread(target=self._animation_loop)
         animation_thread.daemon = True
         animation_thread.start()
-        logging.info("Animation loop started")
+        logging.info("Animation loop initialized (idle until needed)")
     
     def _animation_loop(self):
-        """Main animation loop that runs at 60 FPS"""
+        """Main animation loop that only runs when indeterminate mode is active"""
         while self.animation_running:
-            start_time = time.time()
+            # Wait for animation to be needed (blocks without consuming CPU)
+            self._animation_event.wait()
             
-            # Update UI on the main thread
-            self.after(0, self._update_animation_frame)
-            
-            # Calculate time to sleep to maintain FPS
-            elapsed = time.time() - start_time
-            sleep_time = max(0, self.frame_time - elapsed)
-            time.sleep(sleep_time)
+            if not self.animation_running:
+                break
+                
+            if self._indeterminate_active:
+                start_time = time.time()
+                
+                # Update UI on the main thread
+                self.after(0, self._update_animation_frame)
+                
+                # Calculate time to sleep to maintain FPS
+                elapsed = time.time() - start_time
+                sleep_time = max(0, self.frame_time - elapsed)
+                time.sleep(sleep_time)
+            else:
+                # Animation not needed, go back to waiting
+                self._animation_event.clear()
     
     def _update_animation_frame(self):
         """Update a single frame of animation"""
-        if hasattr(self, 'progress_bar') and self.progress_bar.cget("mode") == "indeterminate":
-            # Only update the indeterminate progress if it's actually in that mode
-            # This prevents conflicts with determinate progress updates
-            if not hasattr(self, '_indeterminate_active') or self._indeterminate_active:
+        if hasattr(self, 'progress_bar') and self._indeterminate_active:
+            try:
                 # Get the current progress value
                 current = self.progress_bar.get()
                 
                 # Create a smooth back-and-forth animation
                 new_value = (current + 0.02) % 1.0
                 self.progress_bar.set(new_value)
+            except Exception:
+                pass  # Widget might be destroyed
     
     def _create_circle_image(self, size, color):
         """Create a circular image of specified size and color"""
@@ -581,6 +592,7 @@ class AscendaraInstaller(ctk.CTk):
         self.progress_bar.configure(mode="indeterminate")
         self.progress_bar.start()
         self._indeterminate_active = True
+        self._animation_event.set()  # Wake up the animation thread
         
         # Start the installer process
         installer = InstallerProcess(
@@ -611,6 +623,12 @@ class AscendaraInstaller(ctk.CTk):
     
     def close(self):
         """Close the application with fade effect"""
+        # Stop animation thread
+        self.animation_running = False
+        self._indeterminate_active = False
+        if hasattr(self, '_animation_event'):
+            self._animation_event.set()  # Wake up thread so it can exit
+        
         # Close log window if open
         if self.log_window is not None and hasattr(self.log_window, 'winfo_exists') and self.log_window.winfo_exists():
             try:
@@ -648,6 +666,7 @@ class AscendaraInstaller(ctk.CTk):
                 self.progress_bar.configure(mode="indeterminate")
                 self.progress_bar.start()
                 self._indeterminate_active = True
+                self._animation_event.set()  # Wake up the animation thread
             return
         
         # If we were in indeterminate mode, switch to determinate
