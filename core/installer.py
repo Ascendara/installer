@@ -70,7 +70,7 @@ class InstallerProcess(threading.Thread):
                         if self.progress_callback:
                             self.progress_callback(None)  # Switch to indeterminate mode
                         
-                        process = subprocess.Popen([local_file], shell=True)
+                        process = subprocess.Popen([local_file])
                         process.wait()
                         
                         if process.returncode == 0:
@@ -109,7 +109,7 @@ class InstallerProcess(threading.Thread):
                 if self.progress_callback:
                     self.progress_callback(None)  # Switch to indeterminate mode
                 
-                process = subprocess.Popen([local_file], shell=True)
+                process = subprocess.Popen([local_file])
                 process.wait()
                 
                 if process.returncode == 0:
