@@ -688,9 +688,11 @@ class AscendaraInstaller(ctk.CTk):
             self.current_task.configure(text="Finalizing installation...")
     
     def _update_status(self, text):
-        """Update the status text"""
+        """Update all status text labels"""
+        logging.info(f"Status update: {text}")
         self.status_label.configure(text=text)
         self.status_text.configure(text=text)
+        self.current_task.configure(text=text)
     
     def _on_installation_complete(self, success):
         """Handle installation completion"""
@@ -729,7 +731,7 @@ class AscendaraInstaller(ctk.CTk):
             logging.info("Creating installer process")
             self.installer = InstallerProcess(
                 progress_callback=self.update_progress,
-                status_callback=self._update_status_text,
+                status_callback=self._update_status,
                 completion_callback=self._on_installation_complete
             )
             logging.info("Starting installer process")
@@ -739,11 +741,7 @@ class AscendaraInstaller(ctk.CTk):
             logging.error(f"Failed to start installation: {e}")
             self._on_installation_error(str(e))
     
-    def _update_status_text(self, text):
-        """Update the status text"""
-        logging.info(f"Status update: {text}")
-        self.status_text.configure(text=text)
-        self.current_task.configure(text=text)
+
     
     def _on_installation_error(self, error):
         """Handle installation error"""
