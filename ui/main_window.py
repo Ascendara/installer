@@ -35,8 +35,7 @@ if windows_dark_mode:
 else:
     ctk.set_appearance_mode("light")
 
-# Set appearance mode and default color theme
-ctk.set_appearance_mode("light")
+# Set default color theme
 ctk.set_default_color_theme("blue")
 
 class AscendaraInstaller(ctk.CTk):
