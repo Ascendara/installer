@@ -152,8 +152,9 @@ class LogWindow(ctk.CTkToplevel):
         
         # Show confirmation
         self.status_label.configure(text="Logs copied to clipboard")
+        line_count = log_content.count("\n") + 1 if log_content else 0
         self.after(3000, lambda: self.status_label.configure(
-            text=f"{log_content.count('\n') + 1 if log_content else 0} lines"
+            text=f"{line_count} lines"
         ))
     
     def _clear_logs(self):

@@ -1,8 +1,6 @@
 # main_window.py
 import os
 import logging
-import threading
-import time
 import requests
 from io import BytesIO
 from PIL import Image
@@ -101,6 +99,10 @@ class AscendaraInstaller(ctk.CTk):
         
         logging.info(f"Installer Version {version}")
         
+        # Make sure any close path (Alt+F4, taskbar, etc.) also stops the
+        # animation loop instead of leaving it running against a destroyed window
+        self.protocol("WM_DELETE_WINDOW", self.close)
+
         # Start animation loop
         self._start_animation_loop()
         
@@ -475,38 +477,33 @@ class AscendaraInstaller(ctk.CTk):
         self.copyright.pack(side="right", padx=10, pady=2)
     
     def _start_animation_loop(self):
-        """Start a high-performance animation loop running at 60 FPS"""
         self.animation_running = True
-        animation_thread = threading.Thread(target=self._animation_loop)
-        animation_thread.daemon = True
-        animation_thread.start()
+        self._update_animation_frame()
         logging.info("Animation loop started")
-    
-    def _animation_loop(self):
-        """Main animation loop that runs at 60 FPS"""
-        while self.animation_running:
-            start_time = time.time()
-            
-            # Update UI on the main thread
-            self.after(0, self._update_animation_frame)
-            
-            # Calculate time to sleep to maintain FPS
-            elapsed = time.time() - start_time
-            sleep_time = max(0, self.frame_time - elapsed)
-            time.sleep(sleep_time)
-    
+
     def _update_animation_frame(self):
-        """Update a single frame of animation"""
-        if hasattr(self, 'progress_bar') and self.progress_bar.cget("mode") == "indeterminate":
-            # Only update the indeterminate progress if it's actually in that mode
-            # This prevents conflicts with determinate progress updates
-            if not hasattr(self, '_indeterminate_active') or self._indeterminate_active:
-                # Get the current progress value
-                current = self.progress_bar.get()
-                
-                # Create a smooth back-and-forth animation
-                new_value = (current + 0.02) % 1.0
-                self.progress_bar.set(new_value)
+        """Update a single frame of animation and schedule the next one"""
+        if not self.animation_running or not self.winfo_exists():
+            return
+
+        try:
+            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists() and self.progress_bar.cget("mode") == "indeterminate":
+                # Only update the indeterminate progress if it's actually in that mode
+                # This prevents conflicts with determinate progress updates
+                if not hasattr(self, '_indeterminate_active') or self._indeterminate_active:
+                    # Get the current progress value
+                    current = self.progress_bar.get()
+
+                    # Create a smooth back-and-forth animation
+                    new_value = (current + 0.02) % 1.0
+                    self.progress_bar.set(new_value)
+        except Exception as e:
+            logging.warning(f"Animation frame update failed: {e}")
+            return
+
+        if self.animation_running and self.winfo_exists():
+            after_id = self.after(int(self.frame_time * 1000), self._update_animation_frame)
+            self.after_ids['animation_frame'] = after_id
     
     def _create_circle_image(self, size, color):
         """Create a circular image of specified size and color"""
@@ -611,6 +608,9 @@ class AscendaraInstaller(ctk.CTk):
     
     def close(self):
         """Close the application with fade effect"""
+        # Stop the animation loop first so it can't fire after destroy()
+        self.animation_running = False
+
         # Close log window if open
         if self.log_window is not None and hasattr(self.log_window, 'winfo_exists') and self.log_window.winfo_exists():
             try:
