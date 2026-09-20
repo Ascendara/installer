@@ -285,7 +285,7 @@ class AscendaraInstaller(ctk.CTk):
         # Try to load logo from URL
         try:
             logo_url = "https://raw.githubusercontent.com/Ascendara/ascendara/refs/heads/main/src/public/icon.png"
-            response = requests.get(logo_url)
+            response = requests.get(logo_url, timeout=5)
             if response.status_code == 200:
                 logo_image = Image.open(BytesIO(response.content))
                 logo_image = logo_image.resize((100, 100), Image.Resampling.LANCZOS)
@@ -339,7 +339,7 @@ class AscendaraInstaller(ctk.CTk):
         
         # Subtitle
         try:
-            response = requests.get("https://api.ascendara.app/")
+            response = requests.get("https://api.ascendara.app/", timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 app_ver = data["appVer"]
