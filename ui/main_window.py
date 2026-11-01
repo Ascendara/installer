@@ -1,755 +1,674 @@
 # main_window.py
 import os
+import queue
 import logging
-import requests
+import datetime
+import threading
 from io import BytesIO
+
+import requests
 from PIL import Image
 import customtkinter as ctk
+
 from core.installer import InstallerProcess
 from core.version import version
+from ui import theme
 
-# Windows dark mode detection helper
-def is_windows_dark_mode():
-    try:
-        import winreg
-        registry = winreg.ConnectRegistry(None, winreg.HKEY_CURRENT_USER)
-        key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        key = winreg.OpenKey(registry, key_path)
-        # Value 1 means light mode, 0 means dark mode
-        apps_use_light_theme, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
-        winreg.CloseKey(key)
-        return apps_use_light_theme == 0
-    except Exception as e:
-        logging.warning(f"Could not detect Windows dark mode: {e}")
-        return False
-        
+LOGO_URL = "https://raw.githubusercontent.com/Ascendara/ascendara/refs/heads/main/src/public/icon.png"
+VERSION_URL = "https://api.ascendara.app/"
 
-# Detect Windows dark mode once before initializing CTk
-windows_dark_mode = is_windows_dark_mode()
+WIDTH, HEIGHT = 860, 540
+HERO_WIDTH = 300
+SPINNER_FRAMES = 12
+
+# Detect the Windows theme once, before any CTk widgets are created
+windows_dark_mode = theme.is_windows_dark_mode()
 logging.info(f"Windows dark mode detected: {windows_dark_mode}")
-
-if windows_dark_mode:
-    ctk.set_appearance_mode("dark")
-else:
-    ctk.set_appearance_mode("light")
-
-# Set appearance mode and default color theme
-ctk.set_appearance_mode("light")
+ctk.set_appearance_mode("dark" if windows_dark_mode else "light")
 ctk.set_default_color_theme("blue")
+
+STEPS = [
+    ("Download", "Fetching the latest release"),
+    ("Install", "Running the Ascendara setup"),
+    ("Launch", "Opening Ascendara"),
+]
+
 
 class AscendaraInstaller(ctk.CTk):
     def __init__(self):
         """Initialize the main application window"""
         super().__init__()
-    
         logging.info("Initializing main window")
-            
-        # Set up colors for light theme
-        self.light_colors = {
-            "bg_primary": "#F5F0FF",
-            "bg_secondary": "#EBE4FF",
-            "bg_tertiary": "#E0D6FF",
-            "text_primary": "#6A3CB5",
-            "text_secondary": "#8A6BF0",
-            "accent": "#8A6BF0",
-            "accent_hover": "#7A5BE0",
-            "success": "#4CAF50",
-            "error": "#F44336"
-        }
 
-        self.dark_colors = {
-            "bg_primary": "#1E1E2F",
-            "bg_secondary": "#2C2C3E",
-            "bg_tertiary": "#3A3A4E",
-            "text_primary": "#C0C0FF",
-            "text_secondary": "#A0A0F0",
-            "accent": "#8A6BF0",
-            "accent_hover": "#7A5BE0",
-            "success": "#4CAF50",
-            "error": "#F44336"
-        }
+        self.colors = theme.DARK if windows_dark_mode else theme.LIGHT
+        self.font = theme.ui_font()
+        self.font_semibold = theme.ui_font_semibold()
+        self.icon_font = theme.icon_font()
 
-        self.colors = self.light_colors if not windows_dark_mode else self.dark_colors
-
-        
-        # Set up animation properties
-        self.frame_time = 1.0 / 60.0  # Target 60 FPS
-        self.animation_running = False
-        
-        # Initialize log window reference
         self.log_window = None
-        
-        # Initialize installer reference
         self.installer = None
-        
-        # Track after callbacks
         self.after_ids = {}
-        
-        # Initialize variables
         self.x = 0
         self.y = 0
-        self._indeterminate_active = False
-        
-        # Configure window
-        logging.info("Setting up window...")
+        self.closing = False
+
+        # Background threads post UI work here; it is drained on the Tk thread
+        self._ui_queue = queue.Queue()
+
+        # State
+        self.app_version = None
+        self.logo_image = None
+        self.step_states = ["pending"] * len(STEPS)
+        self.spinner_frame = 0
+        self.target_progress = 0.0
+        self.shown_progress = 0.0
+        self.indeterminate = False
+        self.last_status = ""
+
         self._setup_window()
-        
-        # Create UI elements
         self._create_ui()
-        
+
         logging.info(f"Installer Version {version}")
-        
-        # Make sure any close path (Alt+F4, taskbar, etc.) also stops the
-        # animation loop instead of leaving it running against a destroyed window
         self.protocol("WM_DELETE_WINDOW", self.close)
 
-        # Start animation loop
-        self._start_animation_loop()
-        
-        # Fade in the window
-        self.attributes('-alpha', 0.0)
+        self._poll_ui_queue()
+        self._spinner_tick()
+        self._load_remote_assets()
+
+        # Fade in, then start installing
+        self.attributes("-alpha", 0.0)
+        self.after(20, self._apply_native_styles)
         self.fade_in(completion_callback=self.on_fade_in_complete)
-        
+
+    # ------------------------------------------------------------------ #
+    # Window setup
+    # ------------------------------------------------------------------ #
     def _setup_window(self):
         """Set up the main window properties"""
-        logging.info("Configuring window properties...")
         self.title("Ascendara Installer")
-        self.geometry("850x550")
         self.resizable(False, False)
         self.overrideredirect(True)  # Frameless window
-        
-        # Center window on screen
-        x = (self.winfo_screenwidth() - 850) // 2
-        y = (self.winfo_screenheight() - 550) // 2
-        self.geometry(f"850x550+{x}+{y}")
+        self.configure(fg_color=self.colors["bg"])
+
+        scaling = self._get_window_scaling()
+        x = int((self.winfo_screenwidth() - WIDTH * scaling) // 2)
+        y = int((self.winfo_screenheight() - HEIGHT * scaling) // 2)
+        self.geometry(f"{WIDTH}x{HEIGHT}+{x}+{y}")
         logging.info(f"Window positioned at x={x}, y={y}")
-        
-        # Configure grid
+
+        try:
+            self.iconbitmap(theme.resource_path("ascendara.ico"))
+        except Exception:
+            pass
+
         self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-        
+        self.grid_columnconfigure(1, weight=1)
+
+    def _apply_native_styles(self):
+        """Rounded corners and a taskbar entry for the frameless window."""
+        theme.make_app_window(self)
+        self.after(30, lambda: theme.round_corners(self))
+
+    def _font(self, size, weight="normal"):
+        if weight == "semibold":
+            return ctk.CTkFont(family=self.font_semibold, size=size)
+        return ctk.CTkFont(family=self.font, size=size, weight=weight)
+
+    # ------------------------------------------------------------------ #
+    # UI construction
+    # ------------------------------------------------------------------ #
     def _create_ui(self):
         """Create the complete UI structure"""
-        # Create main container
-        self.main_frame = ctk.CTkFrame(
-            self, 
-            fg_color=self.colors["bg_primary"],
-            corner_radius=0
-        )
-        self.main_frame.grid(row=0, column=0, sticky="nsew")
-        
-        # Create title bar
+        self._create_hero()
+
+        self.panel = ctk.CTkFrame(self, fg_color=self.colors["bg"], corner_radius=0)
+        self.panel.grid(row=0, column=1, sticky="nsew")
+
         self._create_title_bar()
-        
-        # Create content area
-        self._create_content_area()
-        
-        # Create status bar
-        self._create_status_bar()
-    
+        self._create_footer()
+        self._create_progress_card()
+        self._create_body()
+
+    def _create_hero(self):
+        """Branded gradient panel on the left"""
+        self.hero_label = ctk.CTkLabel(self, text="", width=HERO_WIDTH, height=HEIGHT, corner_radius=0)
+        self.hero_label.grid(row=0, column=0, sticky="nsw")
+        self._render_hero()
+        self._make_draggable(self.hero_label)
+
+    def _render_hero(self):
+        pil = theme.render_hero(
+            HERO_WIDTH, HEIGHT,
+            logo=self.logo_image,
+            version_text=f"Installer v{version}",
+            year=str(datetime.date.today().year),
+        )
+        self.hero_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=(HERO_WIDTH, HEIGHT))
+        self.hero_label.configure(image=self.hero_image)
+
     def _create_title_bar(self):
-        """Create a custom title bar"""
-        # Title bar container
-        self.title_bar = ctk.CTkFrame(
-            self.main_frame,
-            fg_color=self.colors["bg_secondary"],
-            height=40,
-            corner_radius=0
-        )
+        """Window controls in the top-right; the whole strip is draggable"""
+        self.title_bar = ctk.CTkFrame(self.panel, fg_color="transparent", height=40, corner_radius=0)
         self.title_bar.pack(fill="x")
-        
-        # Make the title bar draggable
-        self.title_bar.bind("<Button-1>", self._start_window_move)
-        self.title_bar.bind("<B1-Motion>", self._on_window_move)
-        
-        # Title
-        self.window_title = ctk.CTkLabel(
+        self.title_bar.pack_propagate(False)
+        self._make_draggable(self.title_bar)
+
+        self.close_button = self._caption_button("close", self.close, danger=True)
+        self.close_button.pack(side="right")
+        self.minimize_button = self._caption_button("minimize", lambda: theme.minimize(self))
+        self.minimize_button.pack(side="right")
+
+    def _caption_button(self, icon, command, danger=False):
+        c = self.colors
+        btn = ctk.CTkButton(
             self.title_bar,
-            text="Ascendara Installer",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            text_color=self.colors["text_primary"]
-        )
-        self.window_title.pack(side="left", padx=15, pady=10)
-        
-        # Window controls container
-        self.controls_frame = ctk.CTkFrame(
-            self.title_bar,
-            fg_color="transparent"
-        )
-        self.controls_frame.pack(side="right", padx=10)
-        
-        # Log button
-        self.log_button = ctk.CTkButton(
-            self.controls_frame,
-            text="📋",
-            font=ctk.CTkFont(size=13),
-            width=35,
-            height=28,
-            corner_radius=5,
-            fg_color=self.colors["bg_tertiary"],
-            hover_color=self.colors["accent"],
-            text_color=self.colors["text_primary"],
-            command=self._show_logs
-        )
-        self.log_button.pack(side="left", padx=5, pady=6)
-        
-        # Minimize button
-        self.minimize_button = ctk.CTkButton(
-            self.controls_frame,
-            text="−",
-            font=ctk.CTkFont(size=13),
-            width=35,
-            height=28,
-            corner_radius=5,
-            fg_color=self.colors["bg_tertiary"],
-            hover_color=self.colors["accent"],
-            text_color=self.colors["text_primary"],
-            command=self.iconify
-        )
-        self.minimize_button.pack(side="left", padx=5, pady=6)
-        
-        # Close button
-        self.close_button = ctk.CTkButton(
-            self.controls_frame,
-            text="×",
-            font=ctk.CTkFont(size=13),
-            width=35,
-            height=28,
-            corner_radius=5,
-            fg_color="#F44336",
-            hover_color="#D32F2F",
-            text_color="#FFFFFF",
-            command=self.close
-        )
-        self.close_button.pack(side="left", padx=5, pady=6)
-    
-    def _create_content_area(self):
-        """Create the main content area"""
-        # Content container
-        self.content_area = ctk.CTkFrame(
-            self.main_frame,
-            fg_color=self.colors["bg_primary"],
-            corner_radius=0
-        )
-        self.content_area.pack(fill="both", expand=True)
-        
-        # Create logo section
-        self._create_logo_section()
-        
-        # Welcome section
-        self._create_welcome_section()
-        
-        # Progress section
-        self._create_progress_section()
-        
-        # Install button
-        self.install_button = ctk.CTkButton(
-            self.content_area,
-            text="Install",
-            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
-            width=150,
-            height=40,
-            corner_radius=10,
-            fg_color=self.colors["accent"],
-            hover_color=self.colors["accent_hover"],
-            text_color="#FFFFFF",
-            command=self._on_install_click
-        )
-        self.install_button.pack(pady=(20, 0))
-        
-        # Exit button
-        self.exit_button = ctk.CTkButton(
-            self.content_area,
-            text="Exit",
-            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
-            width=150,
-            height=40,
-            corner_radius=10,
-            fg_color=self.colors["bg_secondary"],
-            hover_color=self.colors["bg_tertiary"],
-            text_color=self.colors["text_primary"],
-            command=self.close
-        )
-        self.exit_button.pack(pady=(10, 0))
-    
-    def _create_logo_section(self):
-        """Create the logo section in the center top"""
-        # Logo container
-        self.logo_frame = ctk.CTkFrame(
-            self.content_area,
+            text=theme.glyph(icon),
+            font=ctk.CTkFont(family=self.icon_font or self.font, size=10),
+            width=46, height=40, corner_radius=0,
             fg_color="transparent",
-            height=150
+            hover_color=c["close_hover"] if danger else c["surface_alt"],
+            text_color=c["text_muted"],
+            command=command,
         )
-        self.logo_frame.pack(fill="x", pady=(30, 0))
-        
-        # Try to load logo from URL
-        try:
-            logo_url = "https://raw.githubusercontent.com/Ascendara/ascendara/refs/heads/main/src/public/icon.png"
-            response = requests.get(logo_url)
-            if response.status_code == 200:
-                logo_image = Image.open(BytesIO(response.content))
-                logo_image = logo_image.resize((100, 100), Image.Resampling.LANCZOS)
-                self.logo_photo = ctk.CTkImage(light_image=logo_image, dark_image=logo_image, size=(100, 100))
-                
-                self.logo_label = ctk.CTkLabel(
-                    self.logo_frame,
-                    text="",
-                    image=self.logo_photo
-                )
-                self.logo_label.pack(pady=10)
-            else:
-                self._create_fallback_logo()
-        except Exception as e:
-            logging.error(f"Error loading logo: {e}")
-            self._create_fallback_logo()
-    
-    def _create_fallback_logo(self):
-        """Create a fallback logo when image loading fails"""
-        # Outer circle
-        self.logo_outer = self._create_circle_image(100, self.colors["accent"])
-        
-        # Create label with the image
-        self.logo_label = ctk.CTkLabel(
-            self.logo_frame,
-            text="A",
-            font=ctk.CTkFont(family="Segoe UI", size=40, weight="bold"),
-            text_color=self.colors["text_primary"],
-            image=self.logo_outer,
-            compound="center"
+        if danger:
+            btn.bind("<Enter>", lambda e: btn.configure(text_color="#FFFFFF"), add="+")
+            btn.bind("<Leave>", lambda e: btn.configure(text_color=c["text_muted"]), add="+")
+        return btn
+
+    def _create_body(self):
+        """Heading, description and the step list"""
+        c = self.colors
+        self.body = ctk.CTkFrame(self.panel, fg_color="transparent")
+        self.body.pack(fill="both", expand=True, padx=44, pady=(4, 0))
+        self._make_draggable(self.body)
+
+        self.eyebrow = ctk.CTkLabel(
+            self.body, text="STEP 1 OF 3", font=self._font(11, "semibold"),
+            text_color=c["accent"], height=16,
         )
-        self.logo_label.pack(pady=10)
-    
-    def _create_welcome_section(self):
-        """Create the welcome/header section"""
-        # Welcome container
-        self.welcome_frame = ctk.CTkFrame(
-            self.content_area,
-            fg_color="transparent"
+        self.eyebrow.pack(anchor="w")
+
+        self.heading = ctk.CTkLabel(
+            self.body, text="Getting things ready", font=self._font(26, "bold"),
+            text_color=c["text"], anchor="w",
         )
-        self.welcome_frame.pack(fill="x", padx=60, pady=(10, 20))
-        
-        # Main title
-        self.main_title = ctk.CTkLabel(
-            self.welcome_frame,
-            text="Welcome to Ascendara",
-            font=ctk.CTkFont(family="Segoe UI", size=32, weight="bold"),
-            text_color=self.colors["text_primary"]
-        )
-        self.main_title.pack(anchor="center")
-        
-        # Subtitle
-        try:
-            response = requests.get("https://api.ascendara.app/")
-            if response.status_code == 200:
-                data = response.json()
-                app_ver = data["appVer"]
-                subtitle_text = f"Installing version {app_ver} on your computer"
-            else:
-                subtitle_text = "Installing the latest version on your computer"
-        except:
-            subtitle_text = "Installing the latest version on your computer"
-        
+        self.heading.pack(anchor="w", pady=(2, 0))
+
         self.subtitle = ctk.CTkLabel(
-            self.welcome_frame,
-            text=subtitle_text,
-            font=ctk.CTkFont(family="Segoe UI", size=16),
-            text_color=self.colors["text_secondary"]
+            self.body,
+            text=self._subtitle_text(),
+            font=self._font(13), text_color=c["text_muted"],
+            justify="left", anchor="w", wraplength=460,
         )
-        self.subtitle.pack(anchor="center", pady=(5, 0))
-        
-        # Description
-        self.description = ctk.CTkLabel(
-            self.welcome_frame,
-            text="This process will take just a moment.\nThe application will launch automatically when installation is complete.",
-            font=ctk.CTkFont(family="Segoe UI", size=14),
-            text_color=self.colors["text_secondary"],
-            justify="center"
+        self.subtitle.pack(anchor="w", pady=(6, 0))
+
+        # Steps
+        self.steps_frame = ctk.CTkFrame(self.body, fg_color="transparent")
+        self.steps_frame.pack(anchor="w", fill="x", pady=(26, 0))
+        self.steps_frame.grid_columnconfigure(1, weight=1)
+
+        self.step_icons, self.step_titles, self.step_captions, self.step_lines = [], [], [], []
+        for i, (title, caption) in enumerate(STEPS):
+            icon = ctk.CTkLabel(self.steps_frame, text="", width=24, height=24)
+            icon.grid(row=i * 2, column=0, rowspan=1, sticky="n", pady=(2, 0))
+
+            text_col = ctk.CTkFrame(self.steps_frame, fg_color="transparent")
+            text_col.grid(row=i * 2, column=1, sticky="w", padx=(14, 0))
+            t = ctk.CTkLabel(text_col, text=title, font=self._font(13, "semibold"),
+                             text_color=c["text_subtle"], height=18, anchor="w")
+            t.pack(anchor="w")
+            cap = ctk.CTkLabel(text_col, text=caption, font=self._font(12),
+                               text_color=c["text_subtle"], height=16, anchor="w")
+            cap.pack(anchor="w")
+
+            if i < len(STEPS) - 1:
+                line = ctk.CTkFrame(self.steps_frame, width=2, height=14,
+                                    fg_color=c["border"], corner_radius=1)
+                line.grid(row=i * 2 + 1, column=0, pady=4)
+                self.step_lines.append(line)
+
+            self.step_icons.append(icon)
+            self.step_titles.append(t)
+            self.step_captions.append(cap)
+
+        self._refresh_steps()
+
+    def _create_progress_card(self):
+        """Progress bar with status and percentage"""
+        c = self.colors
+        self.card = ctk.CTkFrame(
+            self.panel, fg_color=c["surface"], corner_radius=14,
+            border_width=1, border_color=c["border"],
         )
-        self.description.pack(anchor="center", pady=(10, 0))
-    
-    def _create_progress_section(self):
-        """Create the installation progress section"""
-        # Progress container
-        self.progress_frame = ctk.CTkFrame(
-            self.content_area,
-            fg_color=self.colors["bg_secondary"],
-            corner_radius=15
-        )
-        self.progress_frame.pack(fill="x", padx=60, pady=20)
-        
-        # Progress header
-        self.progress_header = ctk.CTkFrame(
-            self.progress_frame,
-            fg_color="transparent"
-        )
-        self.progress_header.pack(fill="x", padx=20, pady=(20, 10))
-        
-        # Progress title
-        self.progress_title = ctk.CTkLabel(
-            self.progress_header,
-            text="Installation Progress",
-            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
-            text_color=self.colors["text_primary"]
-        )
-        self.progress_title.pack(side="left")
-        
-        # Status label
+        self.card.pack(side="bottom", fill="x", padx=44, pady=(0, 6))
+
+        top = ctk.CTkFrame(self.card, fg_color="transparent")
+        top.pack(fill="x", padx=20, pady=(16, 0))
+
         self.status_label = ctk.CTkLabel(
-            self.progress_header,
-            text="Preparing...",
-            font=ctk.CTkFont(family="Segoe UI", size=14),
-            text_color=self.colors["text_secondary"]
+            top, text="Preparing…", font=self._font(13, "semibold"),
+            text_color=c["text"], anchor="w",
         )
-        self.status_label.pack(side="right")
-        
-        # Progress bar container
-        self.progress_bar_frame = ctk.CTkFrame(
-            self.progress_frame,
-            fg_color="transparent"
-        )
-        self.progress_bar_frame.pack(fill="x", padx=20, pady=(10, 20))
-        
-        # Progress bar
-        self.progress_bar = ctk.CTkProgressBar(
-            self.progress_bar_frame,
-            width=600,
-            height=15,
-            corner_radius=7,
-            fg_color=self.colors["bg_primary"],
-            progress_color=self.colors["accent"],
-            mode="determinate"
-        )
-        self.progress_bar.pack(fill="x", pady=5)
-        self.progress_bar.set(0)
-        
-        # Progress details
-        self.progress_details_frame = ctk.CTkFrame(
-            self.progress_frame,
-            fg_color="transparent"
-        )
-        self.progress_details_frame.pack(fill="x", padx=20, pady=(0, 20))
-        
-        # Current task
-        self.current_task = ctk.CTkLabel(
-            self.progress_details_frame,
-            text="",
-            font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color=self.colors["text_secondary"]
-        )
-        self.current_task.pack(side="left")
-        
-        # Percentage
+        self.status_label.pack(side="left")
+
         self.percentage = ctk.CTkLabel(
-            self.progress_details_frame,
-            text="0%",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            text_color=self.colors["text_primary"]
+            top, text="", font=self._font(13, "semibold"),
+            text_color=c["text_muted"], anchor="e",
         )
         self.percentage.pack(side="right")
-    
-    def _create_status_bar(self):
-        """Create the status bar at the bottom"""
-        # Status bar container
-        self.status_bar = ctk.CTkFrame(
-            self.main_frame,
-            fg_color=self.colors["bg_secondary"],
-            height=25,
-            corner_radius=0
+
+        self.progress_bar = ctk.CTkProgressBar(
+            self.card, height=6, corner_radius=3,
+            fg_color=c["surface_alt"], progress_color=c["accent"],
+            mode="determinate", indeterminate_speed=0.8,
         )
-        self.status_bar.pack(side="bottom", fill="x")
-        
-        # Status text
-        self.status_text = ctk.CTkLabel(
-            self.status_bar,
-            text="Ready to install",
-            font=ctk.CTkFont(family="Segoe UI", size=10),
-            text_color=self.colors["text_secondary"]
+        self.progress_bar.pack(fill="x", padx=20, pady=(12, 0))
+        self.progress_bar.set(0)
+
+        self.detail_label = ctk.CTkLabel(
+            self.card, text="", font=self._font(12),
+            text_color=c["text_subtle"], anchor="w", height=18,
         )
-        self.status_text.pack(side="left", padx=10, pady=2)
-        
-        # Copyright
-        self.copyright = ctk.CTkLabel(
-            self.status_bar,
-            text=" 2025 Ascendara",
-            font=ctk.CTkFont(family="Segoe UI", size=10),
-            text_color=self.colors["text_secondary"]
+        self.detail_label.pack(fill="x", padx=20, pady=(8, 14))
+
+    def _create_footer(self):
+        """Log link on the left, actions on the right"""
+        c = self.colors
+        self.footer = ctk.CTkFrame(self.panel, fg_color="transparent", height=64)
+        self.footer.pack(side="bottom", fill="x", padx=44, pady=(0, 10))
+        self.footer.pack_propagate(False)
+
+        self.log_button = ctk.CTkButton(
+            self.footer,
+            text="View logs",
+            font=self._font(12),
+            width=0, height=34, corner_radius=8,
+            fg_color="transparent", hover_color=c["surface_alt"],
+            text_color=c["text_muted"],
+            command=self._show_logs,
         )
-        self.copyright.pack(side="right", padx=10, pady=2)
-    
-    def _start_animation_loop(self):
-        self.animation_running = True
-        self._update_animation_frame()
-        logging.info("Animation loop started")
+        self.log_button.pack(side="left", pady=15)
 
-    def _update_animation_frame(self):
-        """Update a single frame of animation and schedule the next one"""
-        if not self.animation_running or not self.winfo_exists():
-            return
+        self.primary_button = ctk.CTkButton(
+            self.footer,
+            text="Try again",
+            font=self._font(13, "semibold"),
+            width=110, height=36, corner_radius=10,
+            fg_color=c["accent"], hover_color=c["accent_hover"],
+            text_color="#FFFFFF",
+            command=self._retry,
+        )
+        # Shown only after a failure
 
-        try:
-            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists() and self.progress_bar.cget("mode") == "indeterminate":
-                # Only update the indeterminate progress if it's actually in that mode
-                # This prevents conflicts with determinate progress updates
-                if not hasattr(self, '_indeterminate_active') or self._indeterminate_active:
-                    # Get the current progress value
-                    current = self.progress_bar.get()
+        self.secondary_button = ctk.CTkButton(
+            self.footer,
+            text="Cancel",
+            font=self._font(13),
+            width=96, height=36, corner_radius=10,
+            fg_color=c["surface_alt"], hover_color=c["surface_hover"],
+            text_color=c["text"],
+            command=self.close,
+        )
+        self.secondary_button.pack(side="right", pady=14)
 
-                    # Create a smooth back-and-forth animation
-                    new_value = (current + 0.02) % 1.0
-                    self.progress_bar.set(new_value)
-        except Exception as e:
-            logging.warning(f"Animation frame update failed: {e}")
-            return
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    def _subtitle_text(self):
+        ver = f"version {self.app_version}" if self.app_version else "the latest version"
+        return (f"Installing {ver} of Ascendara on your computer. "
+                "It will launch automatically once setup is complete.")
 
-        if self.animation_running and self.winfo_exists():
-            after_id = self.after(int(self.frame_time * 1000), self._update_animation_frame)
-            self.after_ids['animation_frame'] = after_id
-    
-    def _create_circle_image(self, size, color):
-        """Create a circular image of specified size and color"""
-        # Create a blank image with alpha channel
-        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        
-        # Get a drawing context
-        from PIL import ImageDraw
-        draw = ImageDraw.Draw(image)
-        
-        # Draw a filled circle
-        draw.ellipse((0, 0, size, size), fill=color)
-        
-        # Convert to CTkImage
-        return ctk.CTkImage(light_image=image, dark_image=image, size=(size, size))
-    
+    def _make_draggable(self, widget):
+        widget.bind("<Button-1>", self._start_window_move, add="+")
+        widget.bind("<B1-Motion>", self._on_window_move, add="+")
+
     def _start_window_move(self, event):
-        """Start window dragging"""
-        self.x = event.x
-        self.y = event.y
-    
+        self.x = event.x_root - self.winfo_x()
+        self.y = event.y_root - self.winfo_y()
+
     def _on_window_move(self, event):
-        """Handle window dragging"""
-        deltax = event.x - self.x
-        deltay = event.y - self.y
-        x = self.winfo_x() + deltax
-        y = self.winfo_y() + deltay
-        self.geometry(f"+{x}+{y}")
-    
-    def _show_logs(self):
-        """Show the log window"""
-        import logging
-        logging.info("Opening log window...")
-        
+        self.geometry(f"+{event.x_root - self.x}+{event.y_root - self.y}")
+
+    def _schedule(self, key, ms, func):
+        if self.closing:
+            return
         try:
-            # Check if log window exists and is still valid
-            if self.log_window is None or not self.log_window.winfo_exists():
-                # Import here to avoid circular imports
-                from ui.log_window import LogWindow
-                logging.info("Creating new log window")
-                self.log_window = LogWindow()
-                self.log_window.focus_force()  # Bring to front
-                logging.info("Log window created successfully")
-            else:
-                # If window exists, just bring it to front
-                logging.info("Focusing existing log window")
-                self.log_window.focus_force()
-                logging.info("Log window focused")
-        except Exception as e:
-            logging.error(f"Error showing log window: {e}")
-            # Reset log window reference and try again
-            self.log_window = None
+            self.after_ids[key] = self.after(ms, func)
+        except Exception:
+            pass
+
+    def _post(self, func, *args):
+        """Run func(*args) on the Tk thread (safe to call from any thread)."""
+        self._ui_queue.put((func, args))
+
+    def _poll_ui_queue(self):
+        try:
+            while True:
+                func, args = self._ui_queue.get_nowait()
+                try:
+                    func(*args)
+                except Exception as e:
+                    logging.error(f"UI update failed: {e}")
+        except queue.Empty:
+            pass
+        self._schedule("ui_queue", 30, self._poll_ui_queue)
+
+    @staticmethod
+    def _truncate(text, limit=64):
+        return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+    # ------------------------------------------------------------------ #
+    # Remote assets (logo + version), loaded off the UI thread
+    # ------------------------------------------------------------------ #
+    def _load_remote_assets(self):
+        def worker():
+            # Logo: bundled copy first, then the repository
+            logo = None
+            local = theme.resource_path("readme", "icon.png")
             try:
-                from ui.log_window import LogWindow
-                logging.info("Retrying log window creation after error")
-                self.log_window = LogWindow()
-                logging.info("Log window created successfully on retry")
-            except Exception as e2:
-                logging.error(f"Failed to create log window on retry: {e2}")
-    
+                if os.path.exists(local):
+                    logo = Image.open(local)
+                    logo.load()
+            except Exception as e:
+                logging.warning(f"Could not load bundled logo: {e}")
+            if logo is None:
+                try:
+                    r = requests.get(LOGO_URL, timeout=8)
+                    if r.status_code == 200:
+                        logo = Image.open(BytesIO(r.content))
+                        logo.load()
+                except Exception as e:
+                    logging.error(f"Error loading logo: {e}")
+            if logo is not None:
+                self._post(self._set_logo, logo)
+
+            try:
+                r = requests.get(VERSION_URL, timeout=5)
+                if r.status_code == 200:
+                    self._post(self._set_app_version, r.json().get("appVer"))
+            except Exception as e:
+                logging.warning(f"Could not fetch app version: {e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_logo(self, logo):
+        self.logo_image = logo
+        self._render_hero()
+
+    def _set_app_version(self, ver):
+        if ver:
+            self.app_version = ver
+            self.subtitle.configure(text=self._subtitle_text())
+
+    # ------------------------------------------------------------------ #
+    # Steps & animation
+    # ------------------------------------------------------------------ #
+    def _set_step(self, index, state):
+        self.step_states[index] = state
+        self._refresh_steps()
+
+    def _refresh_steps(self):
+        c = self.colors
+        active = None
+        for i, state in enumerate(self.step_states):
+            pil = theme.render_step_icon(state, c, frame=self.spinner_frame, frames=SPINNER_FRAMES)
+            img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(24, 24))
+            self.step_icons[i].configure(image=img)
+            self.step_icons[i]._img_ref = img
+
+            if state == "pending":
+                title_color, cap_color = c["text_subtle"], c["text_subtle"]
+            elif state == "error":
+                title_color, cap_color = c["error"], c["text_muted"]
+            else:
+                title_color, cap_color = c["text"], c["text_muted"]
+            self.step_titles[i].configure(text_color=title_color)
+            self.step_captions[i].configure(text_color=cap_color)
+
+            if i < len(self.step_lines):
+                self.step_lines[i].configure(fg_color=c["accent"] if state == "done" else c["border"])
+            if state in ("active", "error") and active is None:
+                active = i
+
+        if active is not None:
+            self.eyebrow.configure(text=f"STEP {active + 1} OF {len(STEPS)}")
+
+    def _spinner_tick(self):
+        """Advance the spinner on whichever step is active"""
+        if "active" in self.step_states:
+            self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES
+            c = self.colors
+            for i, state in enumerate(self.step_states):
+                if state == "active":
+                    pil = theme.render_step_icon("active", c, frame=self.spinner_frame, frames=SPINNER_FRAMES)
+                    img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(24, 24))
+                    self.step_icons[i].configure(image=img)
+                    self.step_icons[i]._img_ref = img
+        self._schedule("spinner", 70, self._spinner_tick)
+
+    def _animate_progress(self):
+        """Ease the bar towards the target value"""
+        self.after_ids.pop("progress", None)
+        if self.indeterminate:
+            return
+        diff = self.target_progress - self.shown_progress
+        if abs(diff) < 0.002:
+            self.shown_progress = self.target_progress
+        else:
+            self.shown_progress += diff * 0.18
+        self.progress_bar.set(self.shown_progress)
+        self.percentage.configure(text=f"{int(round(self.shown_progress * 100))}%")
+        if self.shown_progress != self.target_progress:
+            self._schedule("progress", 16, self._animate_progress)
+
+    def _set_indeterminate(self, on):
+        if on == self.indeterminate:
+            return
+        self.indeterminate = on
+        if on:
+            self.progress_bar.configure(mode="indeterminate")
+            self.progress_bar.start()
+            self.percentage.configure(text="")
+        else:
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="determinate")
+            self.progress_bar.set(self.shown_progress)
+
+    # ------------------------------------------------------------------ #
+    # Installer callbacks (called from the installer thread)
+    # ------------------------------------------------------------------ #
+    def update_progress(self, progress):
+        self._post(self._apply_progress, progress)
+
+    def _update_status(self, text):
+        self._post(self._apply_status, text)
+
+    def _on_installation_complete(self, success):
+        self._post(self._apply_complete, success)
+
+    # ------------------------------------------------------------------ #
+    # UI updates (Tk thread)
+    # ------------------------------------------------------------------ #
+    def _apply_progress(self, progress):
+        if progress is None:
+            self._set_indeterminate(True)
+            return
+        value = float(progress)
+        value = value / 100.0 if value > 1.0 else value
+        value = min(max(value, 0.0), 1.0)
+
+        self._set_indeterminate(False)
+        if value < self.target_progress - 0.5:
+            # A fresh download started (e.g. backup mirror)
+            self.shown_progress = 0.0
+        self.target_progress = value
+        if "progress" not in self.after_ids:
+            self._animate_progress()
+
+    def _apply_status(self, text):
+        logging.info(f"Status update: {text}")
+        self.last_status = text
+        lower = text.lower()
+
+        if "running installer" in lower:
+            self._set_step(0, "done")
+            self._set_step(1, "active")
+            self.heading.configure(text="Installing Ascendara")
+            self.status_label.configure(text="Running setup…")
+            self.detail_label.configure(text="Follow any prompts from the Ascendara setup window")
+        elif lower.startswith("downloading"):
+            self._set_step(0, "active")
+            self.heading.configure(text="Downloading Ascendara")
+            self.status_label.configure(text="Downloading…")
+            self.detail_label.configure(text=self._truncate(text))
+        elif "complete" in lower:
+            self.detail_label.configure(text=self._truncate(text))
+        else:
+            self.detail_label.configure(text=self._truncate(text))
+
+    def _apply_complete(self, success):
+        c = self.colors
+        self._set_indeterminate(False)
+        if success:
+            logging.info("Installation completed successfully")
+            self._set_step(0, "done")
+            self._set_step(1, "done")
+            self._set_step(2, "active")
+            self.target_progress = self.shown_progress = 1.0
+            self.progress_bar.set(1.0)
+            self.progress_bar.configure(progress_color=c["success"])
+            self.percentage.configure(text="100%", text_color=c["success"])
+            self.heading.configure(text="You're all set")
+            self.subtitle.configure(text="Ascendara was installed successfully and is launching now. "
+                                         "This window will close on its own.")
+            self.status_label.configure(text="Installation complete")
+            self.detail_label.configure(text="Launching Ascendara…")
+            self.secondary_button.configure(text="Close")
+            self._schedule("launch_done", 1200, lambda: self._set_step(2, "done"))
+            self._schedule("auto_close", 2200, self.close)
+        else:
+            logging.error("Installation failed")
+            failed = next((i for i, s in enumerate(self.step_states) if s == "active"), 0)
+            self._set_step(failed, "error")
+            self.progress_bar.configure(progress_color=c["error"])
+            self.percentage.configure(text="", text_color=c["text_muted"])
+            self.heading.configure(text="Installation failed")
+            self.subtitle.configure(text="Something went wrong while installing Ascendara. "
+                                         "Check your connection and try again, or open the logs for details.")
+            self.status_label.configure(text="Couldn't finish setup")
+            self.detail_label.configure(text=self._truncate(self.last_status or "See logs for details"))
+            self.secondary_button.configure(text="Exit")
+            self.primary_button.pack(side="right", padx=(10, 0), pady=14, before=self.secondary_button)
+
+    # ------------------------------------------------------------------ #
+    # Installation control
+    # ------------------------------------------------------------------ #
     def on_fade_in_complete(self):
-        """Called when fade in is complete"""
         logging.info("Fade in complete, starting installation")
         self._start_installation()
-    
+
     def _start_installation(self):
-        """Start the installation process"""
-        # Update status
-        self._update_status("Starting installation...")
-        
-        # Set progress bar to indeterminate mode
-        self.progress_bar.configure(mode="indeterminate")
-        self.progress_bar.start()
-        self._indeterminate_active = True
-        
-        # Start the installer process
-        installer = InstallerProcess(
-            progress_callback=self.update_progress,
-            status_callback=self._update_status,
-            completion_callback=self._on_installation_complete
-        )
-        installer.start()
-    
+        """Reset the UI and start the installer thread"""
+        c = self.colors
+        self.step_states = ["active", "pending", "pending"]
+        self._refresh_steps()
+        self.heading.configure(text="Getting things ready")
+        self.subtitle.configure(text=self._subtitle_text())
+        self.status_label.configure(text="Preparing…")
+        self.detail_label.configure(text="Connecting to Ascendara servers")
+        self.percentage.configure(text="", text_color=c["text_muted"])
+        self.progress_bar.configure(progress_color=c["accent"])
+        self.target_progress = self.shown_progress = 0.0
+        self.progress_bar.set(0)
+        self.primary_button.pack_forget()
+        self.secondary_button.configure(text="Cancel")
+        self._set_indeterminate(True)
+
+        try:
+            self.installer = InstallerProcess(
+                progress_callback=self.update_progress,
+                status_callback=self._update_status,
+                completion_callback=self._on_installation_complete,
+            )
+            self.installer.start()
+            logging.info("Installation process started")
+        except Exception as e:
+            logging.error(f"Failed to start installation: {e}")
+            self.last_status = str(e)
+            self._apply_complete(False)
+
+    def _retry(self):
+        logging.info("Retrying installation")
+        self._set_indeterminate(False)
+        self._start_installation()
+
+    # ------------------------------------------------------------------ #
+    # Logs
+    # ------------------------------------------------------------------ #
+    def _show_logs(self):
+        """Show the log window"""
+        logging.info("Opening log window...")
+        try:
+            if self.log_window is None or not self.log_window.winfo_exists():
+                from ui.log_window import LogWindow
+                self.log_window = LogWindow(colors=self.colors, dark=windows_dark_mode)
+                # Centre it over the installer
+                s = self._get_window_scaling()
+                lx = int(self.winfo_x() + (WIDTH * s - 820 * s) / 2)
+                ly = int(self.winfo_y() + (HEIGHT * s - 520 * s) / 2)
+                self.log_window.geometry(f"+{max(lx, 0)}+{max(ly, 0)}")
+            win = self.log_window
+            win.deiconify()
+            # CTkToplevel can lose focus to the parent right after creation,
+            # so raise it again once it has been mapped.
+            for delay in (0, 150):
+                win.after(delay, lambda: win.winfo_exists() and (win.lift(), win.focus_force()))
+        except Exception as e:
+            logging.error(f"Error showing log window: {e}")
+            self.log_window = None
+
+    # ------------------------------------------------------------------ #
+    # Fade / close
+    # ------------------------------------------------------------------ #
     def fade_in(self, current_alpha=0.0, completion_callback=None):
         """Fade in the window gradually"""
         if current_alpha < 1.0:
-            current_alpha += 0.05
-            self.attributes('-alpha', current_alpha)
-            self.after(20, lambda: self.fade_in(current_alpha, completion_callback))
-            logging.info(f"Fading in window: {current_alpha:.2f}")
+            current_alpha = min(current_alpha + 0.08, 1.0)
+            self.attributes("-alpha", current_alpha)
+            self.after(16, lambda: self.fade_in(current_alpha, completion_callback))
         elif completion_callback:
             completion_callback()
-    
-    def fade_out(self, current_alpha=1.0, on_complete=None):
-        """Fade out the window gradually"""
-        if current_alpha > 0:
-            current_alpha -= 0.05
-            self.attributes('-alpha', current_alpha)
-            self.after(20, lambda: self.fade_out(current_alpha, on_complete))
-        elif on_complete:
-            on_complete()
-    
-    def close(self):
-        """Close the application with fade effect"""
-        # Stop the animation loop first so it can't fire after destroy()
-        self.animation_running = False
 
-        # Close log window if open
-        if self.log_window is not None and hasattr(self.log_window, 'winfo_exists') and self.log_window.winfo_exists():
+    def close(self):
+        """Close the application with a fade"""
+        if self.closing:
+            return
+        self.closing = True
+
+        if self.log_window is not None:
             try:
-                self.log_window._on_close()
+                if self.log_window.winfo_exists():
+                    self.log_window._on_close()
             except Exception as e:
-                import logging
                 logging.error(f"Error closing log window: {e}")
-        
-        # Cancel any pending after callbacks
-        for widget_id, after_id in list(self.after_ids.items()):
+
+        for after_id in list(self.after_ids.values()):
             try:
                 self.after_cancel(after_id)
             except Exception:
                 pass
         self.after_ids.clear()
-        
-        # Start fade out
+        try:
+            self.progress_bar.stop()
+        except Exception:
+            pass
         self._fade_out()
-    
+
     def _fade_out(self, current_alpha=1.0):
-        """Fade out the window gradually"""
         if current_alpha > 0:
-            current_alpha -= 0.05
-            self.attributes('-alpha', current_alpha)
-            after_id = self.after(20, lambda: self._fade_out(current_alpha))
-            self.after_ids['fade_out'] = after_id
+            current_alpha = max(current_alpha - 0.1, 0)
+            self.attributes("-alpha", current_alpha)
+            self.after(16, lambda: self._fade_out(current_alpha))
         else:
             self.destroy()
-    
-    def update_progress(self, progress):
-        """Update the installation progress"""
-        if progress is None:
-            # If progress is None, we're in indeterminate mode
-            if self.progress_bar.cget("mode") != "indeterminate":
-                self.progress_bar.configure(mode="indeterminate")
-                self.progress_bar.start()
-                self._indeterminate_active = True
-            return
-        
-        # If we were in indeterminate mode, switch to determinate
-        if self.progress_bar.cget("mode") == "indeterminate":
-            self._indeterminate_active = False
-            self.progress_bar.stop()
-            self.progress_bar.configure(mode="determinate")
-            # Small delay to ensure the transition is smooth
-            self.after(50, lambda: self._update_determinate_progress(progress))
-        else:
-            self._update_determinate_progress(progress)
-    
-    def _update_determinate_progress(self, progress):
-        """Update progress in determinate mode"""
-        # Ensure progress is between 0 and 1
-        # The downloader sends progress as a percentage (0-100)
-        # We need to normalize it to 0-1 for the progress bar
-        if progress > 1.0:
-            normalized_progress = min(max(float(progress) / 100.0, 0.0), 1.0)
-        else:
-            normalized_progress = min(max(float(progress), 0.0), 1.0)
-        
-        # Update progress bar
-        self.progress_bar.set(normalized_progress)
-        
-        # Update percentage text (0-100%)
-        percentage_text = f"{int(normalized_progress * 100)}%"
-        self.percentage.configure(text=percentage_text)
-        
-        # Update task text based on progress
-        if normalized_progress < 0.3:
-            self.current_task.configure(text="Downloading components...")
-        elif normalized_progress < 0.6:
-            self.current_task.configure(text="Extracting files...")
-        elif normalized_progress < 0.9:
-            self.current_task.configure(text="Configuring application...")
-        else:
-            self.current_task.configure(text="Finalizing installation...")
-    
-    def _update_status(self, text):
-        """Update the status text"""
-        self.status_label.configure(text=text)
-        self.status_text.configure(text=text)
-    
-    def _on_installation_complete(self, success):
-        """Handle installation completion"""
-        if success:
-            self.status_label.configure(text="Installation Complete!")
-            self.status_text.configure(text="Installation complete - Launching application...")
-            self.current_task.configure(text="Installation completed successfully")
-            self.progress_bar.configure(progress_color=self.colors["success"])
-            # Close after a delay
-            self.after(2000, self.close)
-        else:
-            self.status_label.configure(text="Installation Failed")
-            self.status_text.configure(text="Installation failed - See logs for details")
-            self.current_task.configure(text="An error occurred during installation")
-            self.progress_bar.configure(progress_color=self.colors["error"])
-    
-    def _on_install_click(self):
-        """Handle install button click"""
-        logging.info("Install button clicked")
-        
-        # Disable buttons during installation
-        self.install_button.configure(state="disabled")
-        self.exit_button.configure(state="disabled")
-        
-        # Update UI for installation
-        self.current_task.configure(text="Preparing installation...")
-        self.percentage.configure(text="0%")
-        
-        # Clear previous installer if exists
-        if self.installer:
-            self.installer = None
-        
-        # Create and start installer process
-        try:
-            from core.installer import InstallerProcess
-            logging.info("Creating installer process")
-            self.installer = InstallerProcess(
-                progress_callback=self.update_progress,
-                status_callback=self._update_status_text,
-                completion_callback=self._on_installation_complete
-            )
-            logging.info("Starting installer process")
-            self.installer.start()
-            logging.info("Installation process started")
-        except Exception as e:
-            logging.error(f"Failed to start installation: {e}")
-            self._on_installation_error(str(e))
-    
-    def _update_status_text(self, text):
-        """Update the status text"""
-        logging.info(f"Status update: {text}")
-        self.status_text.configure(text=text)
-        self.current_task.configure(text=text)
-    
-    def _on_installation_error(self, error):
-        """Handle installation error"""
-        self.status_label.configure(text="Installation Failed")
-        self.status_text.configure(text="Installation failed - See logs for details")
-        self.current_task.configure(text="An error occurred during installation")
-        self.progress_bar.configure(progress_color=self.colors["error"])
-        self.install_button.configure(state="normal")
-        self.exit_button.configure(state="normal")
