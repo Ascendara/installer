@@ -1,7 +1,6 @@
-/ui/__pycache__
-/core/__pycache__
-/utils/__pycache__
+/target
 .env
 /build
-*.spec
 /dist
+*.spec
+__pycache__/

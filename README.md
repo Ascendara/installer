@@ -38,16 +38,20 @@ The installer handles the following tasks:
 
 ## 🔧 Project Structure
 
-The installer is organized into three main components:
+The installer is a single native Rust executable (no runtime required):
 
-- **Core**: Contains the main application logic and installation handlers
-- **UI**: Implements the user interface components and visual elements
-- **Utils**: Provides utility functions for logging, file operations, and error handling
+- **`src/main.rs`**: Entry point and window setup
+- **`src/app.rs`**: Main installer window (layout, steps, progress, animations)
+- **`src/installer.rs`**: Downloads the latest Ascendara setup and runs it
+- **`src/log_window.rs`**: Live log viewer
+- **`src/theme.rs`**: Palette, fonts and the rendered hero panel
+- **`src/logging.rs`**: Logging to memory, stdout and `%LOCALAPPDATA%\Ascendara\InstallerLogs`
+- **`src/win.rs`**: Windows helpers (dark mode detection, rounded corners, fade)
 
 ## 💻 Building From Source
 
 ### Prerequisites
-- Python 3.8 or higher
+- [Rust](https://rustup.rs/) (stable, MSVC toolchain on Windows)
 - Git (for cloning the repository)
 
 ### Setup and Run
@@ -57,30 +61,20 @@ The installer is organized into three main components:
    cd installer
    ```
 
-2. Install dependencies
+2. Run the application
    ```
-   pip install -r requirements.txt
+   cargo run
    ```
 
-3. Run the application
-   ```
-   python app.py
-   ```
+   Debug builds honour `ASCENDARA_SKIP_SETUP=1`, which downloads the setup but doesn't run it.
 
 ### Building Executable
-To build a standalone executable installer:
+To build a standalone executable installer, run the build script
+```
+build-executable.bat
+```
 
-1. Make sure you have PyInstaller installed
-   ```
-   pip install pyinstaller
-   ```
-
-2. Run the build script
-   ```
-   build-executable.bat
-   ```
-
-This will create an executable in the `dist` folder that can be distributed to users.
+This will create `dist\AscendaraInstaller.exe`, which can be distributed to users.
 
 ## 📝 License & Contact  
 
