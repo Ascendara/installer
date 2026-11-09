@@ -4,10 +4,6 @@ import os
 import logging
 import threading
 import requests
-import hmac
-import hashlib
-import time
-import uuid
 from .downloader import Downloader
 
 class InstallerProcess(threading.Thread):
@@ -23,10 +19,6 @@ class InstallerProcess(threading.Thread):
         self.running = False
         logging.info("InstallerProcess initialized")
         self.downloader = Downloader(progress_callback, status_callback)
-        # Generate a unique client ID for this installer instance
-        self.client_id = str(uuid.uuid4())
-        # In production, this should be set via environment variable
-        self.installer_secret = os.environ.get('INSTALLER_SECRET', 'dev_secret_key')
 
     def run(self):
         """Run the installation process"""
@@ -48,14 +40,6 @@ class InstallerProcess(threading.Thread):
                         # Use direct GitHub download URL
                         url = f'https://github.com/tagoWorks/ascendara/releases/download/{version}/Ascendara.Setup.{version}.exe'
                         download_path = os.path.join(tempfile.gettempdir(), f"AscendaraInstaller_{version}.exe")
-                        
-                        # Update download count in background with authentication
-                        is_update = bool(os.environ.get('ASCENDARA_UPDATE', False))
-                        threading.Thread(
-                            target=self._update_download_count,
-                            args=(is_update,),
-                            daemon=True
-                        ).start()
                         
                         if self.status_callback:
                             self.status_callback("Downloading Ascendara...")
@@ -87,19 +71,25 @@ class InstallerProcess(threading.Thread):
                 if self.status_callback:
                     self.status_callback("Primary download failed, trying backup...")
             
-            # Fallback to LFS endpoint
-            url = "https://lfs.ascendara.app/download"
-            if os.environ.get('ASCENDARA_UPDATE'):
-                url += "?update=1"
+            # Fallback: find the setup in GitHub's latest release, in case the API is down
             download_path = os.path.join(tempfile.gettempdir(), "AscendaraInstaller.exe")
-            
+
             try:
-                # Add authentication headers for the download
-                headers = self._generate_auth_headers()
+                release = requests.get(
+                    'https://api.github.com/repos/Ascendara/ascendara/releases/latest',
+                    headers={'Accept': 'application/vnd.github+json'},
+                    timeout=15
+                )
+                release.raise_for_status()
+                url = next(
+                    asset['browser_download_url']
+                    for asset in release.json().get('assets', [])
+                    if asset.get('name', '').startswith('Ascendara.Setup.') and asset['name'].endswith('.exe')
+                )
                 if self.status_callback:
                     self.status_callback("Downloading Ascendara...")
                 
-                local_file = self.downloader.download_file(url, download_path, headers)
+                local_file = self.downloader.download_file(url, download_path)
                 
                 if not os.path.exists(local_file) or os.path.getsize(local_file) == 0:
                     raise Exception("Download verification failed")
@@ -136,36 +126,3 @@ class InstallerProcess(threading.Thread):
                 self.completion_callback(False)
         finally:
             self.running = False
-    
-    def _generate_auth_headers(self):
-        """Generate authentication headers for LFS API"""
-        timestamp = str(int(time.time()))
-        message = f"{timestamp}:{self.client_id}"
-        signature = hmac.new(
-            self.installer_secret.encode(),
-            message.encode(),
-            hashlib.sha256
-        ).hexdigest()
-        
-        return {
-            'X-Installer-Timestamp': timestamp,
-            'X-Installer-Signature': signature,
-            'X-Installer-ID': self.client_id
-        }
-
-    def _update_download_count(self, is_update=False):
-        try:
-            # Make a quick request to LFS endpoint with authentication
-            params = {'update': '1'} if is_update else {}
-            headers = self._generate_auth_headers()
-            
-            requests.get(
-                'https://lfs.ascendara.app/download', 
-                params=params,
-                headers=headers,
-                timeout=2,  # Short timeout since we don't need the response
-                stream=True  # Don't download the file
-            )
-        except:
-            # Silently ignore any errors - download count is not critical
-            pass
