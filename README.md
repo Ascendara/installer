@@ -10,31 +10,31 @@
 
 ## 📦 About
 
-The Ascendara Installer provides a modern, user-friendly interface for installing Ascendara on your computer. 
-It serves as a wrapper around the core Electron-based installation process, offering a seamless and visually 
-appealing experience.
+The Ascendara Installer is a small native Windows app that downloads the latest version of Ascendara
+and runs its setup for you. It's a single Rust executable, so there is no runtime, Python, or
+Visual C++ Redistributable to install first.
 
 ## ✨ Key Features
 
-- Modern and intuitive user interface
-- Real-time installation progress tracking
-- Automatic download of the latest Ascendara version
-- Built-in logging and error handling
+- Clean, frameless two-panel UI that follows the Windows light/dark theme
+- Step-by-step progress (Download, Install, Launch) with a live progress bar
+- Always fetches the latest Ascendara release, with a GitHub fallback if the API is unreachable
+- Built-in log viewer, with logs saved to `%LOCALAPPDATA%\Ascendara\InstallerLogs`
+- Retry button if something goes wrong
+- Renders through DirectX 12 with a software (WARP) fallback, so it works without a GPU driver
 
 ## 📸 Preview
 <div align="center">
-    <img src="./readme/showcase.png" alt="Ascendara Installer Showcase" width="600">
+    <img src="./readme/showcase.png" alt="Ascendara Installer Showcase" width="700">
 </div>
-
-
 
 ## 🚀 Installation Process
 
 The installer handles the following tasks:
-1. Downloads the latest Electron installer package
-2. Provides visual feedback during the installation process
-3. Manages the core installation through the Electron installer
-4. Ensures proper cleanup after installation
+1. Looks up the latest Ascendara version from `api.ascendara.app` (falling back to the latest GitHub release)
+2. Downloads the Ascendara setup with live progress
+3. Runs the setup, passing through any Windows elevation prompts
+4. Launches Ascendara once installation is complete
 
 ## 🔧 Project Structure
 
